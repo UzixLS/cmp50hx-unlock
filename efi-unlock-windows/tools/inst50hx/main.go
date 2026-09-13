@@ -1302,16 +1302,6 @@ func gen2Main() {
 
 	// 1. PL0 writes (BAR0) - via ThrottleStop physical-memory writes
 	fmt.Println("[Gen2] Writing XVE / link registers (ThrottleStop)...")
-	pl0 := []struct {
-		off  uint64
-		val  uint32
-		name string
-	}{
-		{0x8872C, 0x6, "XVE_OVR=6"},
-		{0x8C040, 0x80085800, "LINK_CONFIG_0"},
-		{0x8841C, 0xE0B42D00, "PRIV_MISC_1"},
-		{0x8C2C0, 0x068731B3, "CYA_0"},
-	}
 	bar0raw, _ := hxcore.PciRd(wh, gpuBDF, 0x10)
 	if bar0raw == 0 || bar0raw == 0xFFFFFFFF {
 		bar0raw = 0xF6000000
@@ -1332,16 +1322,23 @@ func gen2Main() {
 		return
 	}
 	fmt.Printf("[Gen2] BAR0 check passed (BOOT_0=0x%08X, TU106)\n", boot0)
-	for _, p := range pl0 {
-		if werr := hxcore.TSWrite(th, bar0Phys+p.off, p.val); werr != nil {
-			fmt.Printf("  [!] %s write failed: %v\n", p.name, werr)
-			continue
+	gen2WritePL0(th, bar0Phys)
+
+	// The LTSSM kick is a one-shot capability adoption per power cycle: if
+	// LNKCAP still advertises Gen1 the adoption did not happen (the one-shot
+	// may already be consumed elsewhere) and the TLS/retrain steps below
+	// cannot succeed — say so instead of retrying blindly.
+	if cap := hxcore.PcieCap(wh, gpuBDF); cap != 0 {
+		lc, _ := hxcore.PciRd(wh, gpuBDF, cap+0x0C)
+		if lc&0xF < 2 {
+			fmt.Printf("[Gen2][!] LNKCAP still Gen%d after the adoption kick (one-shot consumed this power cycle?); cold-boot (full power off) and retry\n", lc&0xF)
+			gen2StatusFail(fmt.Sprintf("LNKCAP still Gen%d after the adoption kick (one-shot consumed?); cold-boot and retry, then send the log", lc&0xF))
+			if !hasArg("-silent") {
+				gen2Notify("Gen2 capability adoption failed.\nCold-boot (full power off) and retry; if it persists, please send the log.")
+			}
+			return
 		}
-		if rb, rerr := hxcore.TSRead(th, bar0Phys+p.off); rerr != nil || rb != p.val {
-			fmt.Printf("  [warn] %s read-back 0x%08x (expected 0x%08x)\n", p.name, rb, p.val)
-		} else {
-			fmt.Printf("  %s OK (0x%08X)\n", p.name, rb)
-		}
+		fmt.Printf("[Gen2] adoption OK: LNKCAP max speed = Gen%d\n", lc&0xF)
 	}
 
 	// 2. LNKCTL2 TLS=2 (GPU + root)
@@ -1513,27 +1510,50 @@ func residentGuard() {
 // The code layer cannot tell whether "current Gen1" is an idle downshift or a true failed train, so -hard is left to manual judgement.
 
 func gen2WritePL0(th syscall.Handle, bar0Phys uint64) {
-	pl0 := []struct {
+	// Proven sequence (Linux X79 host, 2026-09-13): the PCIe policy
+	// registers FIRST, then the one-shot XVE_LTSSM adoption kick LAST.
+	// The kick makes the card latch whatever policy is currently
+	// programmed — kicking before the policy writes adopts the LOCKED set
+	// and burns the one-shot for the whole power cycle (the card then
+	// ignores TLS writes and nothing retrains it above Gen1). Every field
+	// is read-modify-write: the upper bits differ between cards, and the
+	// old hardcoded 0xE0B42D00 / 0x068731B3 values were copied from one
+	// specific card. XP3G VAL0/OVR0 is the unlock strap itself and
+	// PL_LINK_RATE carries the speed code — both were missing entirely.
+	type pl0ent struct {
 		off  uint64
-		val  uint32
+		clr  uint32 // bits to clear
+		val  uint32 // bits to set
 		name string
-	}{
-		{0x8872C, 0x6, "XVE_OVR=6"},
-		{0x8C040, 0x80085800, "LINK_CONFIG_0"},
-		{0x8841C, 0xE0B42D00, "PRIV_MISC_1"},
-		{0x8C2C0, 0x068731B3, "CYA_0"},
 	}
-	for _, p := range pl0 {
-		if werr := hxcore.TSWrite(th, bar0Phys+p.off, p.val); werr != nil {
+	regs := []pl0ent{
+		{0x8841C, (1 << 12) | (1 << 14), (1 << 11) | (1 << 13), "PRIV_MISC_1 GEN2_EN"},
+		{0x88610, 1 << 12, 1, "VSEC_HIERARCHY"},
+		{0x8C2C0, 1 << 2, 0, "CYA_0 bit2=0"},
+		{0x8E120, 0xFFFFFFFF, 0, "XP3G_VAL0=0"},
+		{0x8E110, 0xFFFFFFFF, 1, "XP3G_OVR0=1"},
+		{0x8C040, 0x000C0000, 2 << 18, "LINK_CONFIG_0 MAX_RATE=2"},
+		{0x8C1C0, 0x00060000, 0x00040000, "PL_LINK_RATE GEN2"},
+	}
+	for _, p := range regs {
+		old, _ := hxcore.TSRead(th, bar0Phys+p.off)
+		nv := (old &^ p.clr) | p.val
+		if werr := hxcore.TSWrite(th, bar0Phys+p.off, nv); werr != nil {
 			fmt.Printf("  [!] %s write failed: %v\n", p.name, werr)
 			continue
 		}
-		if rb, rerr := hxcore.TSRead(th, bar0Phys+p.off); rerr != nil || rb != p.val {
-			fmt.Printf("  [warn] %s read-back 0x%08x (expected 0x%08x)\n", p.name, rb, p.val)
+		if rb, rerr := hxcore.TSRead(th, bar0Phys+p.off); rerr != nil || (rb&p.clr) != p.val || (rb&^p.clr) != (old&^p.clr) {
+			fmt.Printf("  [warn] %s read-back 0x%08x (was 0x%08x, wanted fields 0x%08x/0x%08x)\n", p.name, rb, old, p.val, p.clr)
 		} else {
 			fmt.Printf("  %s OK (0x%08X)\n", p.name, rb)
 		}
 	}
+	time.Sleep(50 * time.Millisecond)
+	// XVE_LTSSM kick — one-shot capability adoption (LNKCAP Gen1 -> Gen2).
+	fmt.Println("  XVE_LTSSM adoption kick (0x8872C=6)")
+	_ = hxcore.TSWrite(th, bar0Phys+0x8872C, 6)
+	_, _ = hxcore.TSRead(th, bar0Phys+0x8872C)
+	time.Sleep(50 * time.Millisecond)
 }
 
 // 16-bit LNKCTL2 TLS write (read-modify-write bits 3:0 only, preserve the rest)
