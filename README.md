@@ -122,12 +122,12 @@ kernel, installs them with a backup, blacklists `nouveau`, rebuilds and verifies
 the initramfs, and runs `depmod`. It never reboots or unloads a loaded driver.
 It ends with a best-effort live check of the card.
 
-The installer also enables the `cmp50hx-gen2` boot service: the card unlocks
-its PCIe speed registers by itself a few minutes after each boot, and the
-service fires one Retrain Link on the upstream port then, which trains the
-link to Gen2 x4. The driver's own retrain at first device open runs before
-that unlock and cannot succeed. Watch it with `journalctl -u cmp50hx-gen2 -b`;
-a `PASS` line means the link is at 5.0 GT/s.
+The installer also enables the `cmp50hx-gen2` boot service: it applies the
+PCIe unlock policy directly through BAR0 (GSP reverts the policy registers
+right after the driver's boot window, so waiting for a self-unlock does not
+work), kicks the one-shot capability adoption, and fires Retrain Link on the
+upstream port, which trains the link to Gen2 x4. Watch it with
+`journalctl -u cmp50hx-gen2 -b`; a `PASS` line means the link is at 5.0 GT/s.
 
 When the installer prints `PASS_CMP_INITRAMFS`, reboot to load the patched
 module at boot:

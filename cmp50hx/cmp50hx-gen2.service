@@ -1,5 +1,5 @@
 [Unit]
-Description=CMP 50HX PCIe Gen2 auto-retrain (waits for the card to self-unlock)
+Description=CMP 50HX PCIe Gen2 unlock and auto-retrain (direct BAR0 policy)
 Documentation=https://github.com/xrip/cmp50hx-unlock
 
 [Service]
