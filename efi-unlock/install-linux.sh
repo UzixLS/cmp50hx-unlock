@@ -105,7 +105,13 @@ say "deployed $EFI_DIR/$EFI_NAME ($(stat -c%s "$EFI_FILE") bytes, verified)"
 # --- 4. boot entry ------------------------------------------------------
 ESP_PART="${ESP_PART:-$(findmnt -n -o SOURCE "$ESP_MNT")}"
 ESP_DISK="/dev/$(lsblk -no PKNAME "$ESP_PART" | head -1)"
-ESP_PARTNUM="$(lsblk -no PARTN "$ESP_PART" | head -1)"
+
+# Derive the partition number. Prefer lsblk PARTN (util-linux >= 2.39), fall
+# back to sysfs so older releases (e.g. Debian 12 with util-linux 2.38) work.
+ESP_PARTNUM="$(lsblk -no PARTN "$ESP_PART" 2>/dev/null | head -1)"
+if [[ -z "$ESP_PARTNUM" && -r /sys/class/block/${ESP_PART##*/}/partition ]]; then
+    ESP_PARTNUM="$(cat /sys/class/block/${ESP_PART##*/}/partition 2>/dev/null || true)"
+fi
 [[ -b "$ESP_DISK" && -n "$ESP_PARTNUM" ]] || die "could not derive disk/partition from $ESP_PART"
 
 remove_entry_quiet() {
