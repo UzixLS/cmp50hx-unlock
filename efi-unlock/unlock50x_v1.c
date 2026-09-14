@@ -505,9 +505,9 @@ static UINT64 g_frtsOffset = FW50_FRTS_OFFSET;
 static UINT32 g_wpr2LoUp   = FW50_WPR2_LO_UP;
 static UINT32 g_wpr2HiUp   = FW50_WPR2_HI_UP;
 
-/* Forward decls for helpers defined later; required because GCC 14 makes
- * -Wimplicit-function-declaration an error, and detect_fb_size() below uses
- * these before they appear in source order. */
+/* Forward decl required by GCC 14: -Wimplicit-function-declaration is an
+ * error, and detect_fb_size() below uses mmio_read32() before it is defined
+ * further down. */
 static UINT32 mmio_read32(UINTN offset);
 
 static VOID
