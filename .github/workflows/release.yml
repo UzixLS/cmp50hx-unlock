@@ -74,18 +74,11 @@ jobs:
             cmp50hx-unlock-linux.tar.gz
             cmp50hx-unlock-linux.tar.gz.sha256
 
-      - name: Stage the EFI binary for upload
-        run: |
-          set -eux
-          mkdir -p efi-bin
-          cp efi-unlock/50HXUNLK.EFI efi-bin/50HXUNLK.EFI
-          ls -la efi-bin/
-
       - name: Upload the EFI binary for the Windows job
         uses: actions/upload-artifact@v4
         with:
           name: cmp50hx-efi
-          path: efi-bin/50HXUNLK.EFI
+          path: efi-unlock/50HXUNLK.EFI
 
   # -------------------------------------------------------------------
   # Windows: build the three Go tools (they embed the EFI binary from
@@ -109,10 +102,10 @@ jobs:
       # builds outside this workflow.
       #
       # NOTE: download path must be a *directory*, not a file path.
-      # actions/download-artifact@v4 extracts the artifact ZIP into
-      # that directory; the ZIP contains efi-bin/50HXUNLK.EFI (from
-      # the staging step in the Linux job), so the extracted file
-      # ends up at efi-artifact/efi-bin/50HXUNLK.EFI.
+      # actions/upload-artifact@v4 with a single file strips the
+      # directory prefix from the path, so the ZIP contains just
+      # 50HXUNLK.EFI at its root and `download-artifact` extracts it
+      # to efi-artifact\50HXUNLK.EFI.
       - name: Download the EFI binary built by the Linux job
         uses: actions/download-artifact@v4
         with:
@@ -126,7 +119,7 @@ jobs:
           $W = $env:GITHUB_WORKSPACE
           $Tools = Join-Path $W 'efi-unlock-windows\tools'
           $EmbedDir = Join-Path $Tools 'inst50hx\embed'
-          $Downloaded = Join-Path $W 'efi-artifact\efi-bin\50HXUNLK.EFI'
+          $Downloaded = Join-Path $W 'efi-artifact\50HXUNLK.EFI'
           if (-not (Test-Path $Downloaded)) {
               throw "downloaded EFI missing at $Downloaded"
           }
