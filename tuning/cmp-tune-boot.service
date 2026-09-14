@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply per-GPU CMP trial profiles at boot
+# No After=multi-user.target here: this unit is WantedBy it, and the pair
+# forms an ordering cycle that systemd breaks by deleting a job (observed:
+# the idle governor's start job silently dropped on every boot). Ordering
+# relative to the governor is expressed by Before= below.
+Before=cmp-idle-governor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/cmp-tune -i 0 apply trial-2000-175-0-170
+ExecStart=/usr/local/bin/cmp-tune -i 1 apply trial-2000-175-0-170
+
+[Install]
+WantedBy=multi-user.target
