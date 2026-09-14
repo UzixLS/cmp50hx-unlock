@@ -46,13 +46,14 @@ log "rebuilding initramfs for ${krel}"
 update-initramfs -u -k "${krel}"
 
 # --- verify what actually went into the image -------------------------------
+#
+# Compare srcversion instead of raw bytes: signing (kmodsign) and
+# module compression (zstd/xz/gz) both change the bytes but leave
+# srcversion intact, and modinfo reads srcversion out of all three
+# directly.
 
-module_hash() {
-    case "$1" in
-        *.zst) unzstd -c "$1" 2>/dev/null | sha256sum ;;
-        *.xz)  xz -dc "$1" 2>/dev/null | sha256sum ;;
-        *)     sha256sum "$1" ;;
-    esac
+module_srcversion() {
+    modinfo -F srcversion "$1" 2>/dev/null || echo ""
 }
 
 status="no nvidia module is inside the initramfs; the patched module loads from disk at boot"
@@ -61,26 +62,29 @@ if command -v unmkinitramfs >/dev/null 2>&1; then
     trap 'rm -rf "${tmp}"' EXIT
     unmkinitramfs "${image}" "${tmp}"
 
-    declare -A installed_hashes=()
-    for ko in /lib/modules/"${krel}"/updates/nvidia*.ko; do
-        [[ -e "${ko}" ]] || continue
-        installed_hashes["$(basename "${ko}")"]="$(sha256sum "${ko}" | awk '{print $1}')"
-    done
-
     found=0
     bad=0
     while IFS= read -r -d '' mod; do
         found=1
+        # canonical .ko name (strip any of the three module compressions)
         name="$(basename "${mod}")"
-        name="${name%.zst}"; name="${name%.xz}"
-        img_hash="$(module_hash "${mod}" | awk '{print $1}')"
-        if [[ "${installed_hashes[${name}]:-}" == "${img_hash}" ]]; then
+        for ext in zst xz gz; do
+            [[ "${name}" == *.${ext} ]] && name="${name%.${ext}}"
+        done
+        installed="/lib/modules/${krel}/updates/${name}"
+        [[ -f "${installed}" ]] || continue
+        a="$(module_srcversion "${mod}")"
+        b="$(module_srcversion "${installed}")"
+        if [[ -n "${a}" && "${a}" == "${b}" ]]; then
             log "verified: ${name} in the initramfs matches the patched module"
+        elif [[ -z "${a}" && -z "${b}" ]]; then
+            log "WARNING: ${name} srcversion is empty on both sides; could not verify"
+            bad=1
         else
-            log "MISMATCH: ${name} in the initramfs is NOT the patched module"
+            log "MISMATCH: ${name} in the initramfs is NOT the patched module (srcversion initramfs='${a}' updates='${b}')"
             bad=1
         fi
-    done < <(find "${tmp}" -name 'nvidia.ko*' -print0)
+    done < <(find "${tmp}" -name 'nvidia*.ko*' -print0)
     if [[ ${found} -eq 0 ]]; then
         log "INFO: ${status}"
     elif [[ ${bad} -ne 0 ]]; then
