@@ -221,6 +221,18 @@ Without `--return-to-grub` the behavior is unchanged: the application uses
 its existing internal chainload ladder (or returns to firmware as its last
 resort), which remains the default for BootNext and BootOrder installations.
 
+To keep the compute unlock but skip the PCIe Gen2 configuration and retrain,
+pass the opt-in load option `--no-gen2`. It can be used independently or
+combined with `--return-to-grub`:
+
+```grub
+chainloader /EFI/50HX/50HXUNLK.EFI --return-to-grub --no-gen2
+```
+
+Without `--no-gen2`, PCIe Gen2 behavior is unchanged and remains enabled by
+default. The log prints `[gen2] skipped by --no-gen2` when the option is in
+effect.
+
 ### Rollback
 
 ```bash

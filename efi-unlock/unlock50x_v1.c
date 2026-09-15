@@ -22,6 +22,8 @@
  *     and falls back to returning to firmware (BDS continues BootOrder).
  *   - optional --return-to-grub load option skips that ladder and returns
  *     EFI_SUCCESS to the caller, allowing GRUB to chainload the OS next.
+ *   - optional --no-gen2 load option skips the PCIe Gen2 configuration and
+ *     retrain phase while leaving the compute unlock unchanged.
  *
  * Unlock protocol is unchanged (ported from open-gpu-kernel-modules
  * 610.43.03 init flow, proved on hardware by the 40HX project):
@@ -141,8 +143,8 @@ static void u40x_open_log(EFI_HANDLE IH) {
  * LoadOptions. Match a complete whitespace-delimited token without assuming
  * the firmware supplied a trailing NUL (LoadOptionsSize is authoritative).
  *
- * This is deliberately opt-in: a BootNext/BootOrder launch has no such option
- * and therefore keeps the historical internal chainload behavior. */
+ * All options are deliberately opt-in: a BootNext/BootOrder launch with no
+ * optional data keeps the historical unlock, Gen2, and chainload behavior. */
 static BOOLEAN u40x_has_load_option(EFI_HANDLE IH, const CHAR16 *Option) {
     EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
     const CHAR16 *opts;
@@ -6734,6 +6736,7 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_STATUS Status = EFI_SUCCESS;
     BOOLEAN returnToGrub;
+    BOOLEAN disableGen2;
     UINT64 v67Phys = 0, v67LowPhys = 0;
     UINT64 ucodePhys = 0, blPhys = 0;
     UINT64 radixPhys = 0, radixTabPhys = 0, radixSize = 0;
@@ -6753,8 +6756,11 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     u40x_open_log(ImageHandle);
     Print(L"\n=== CMP50HX Unlock v1-50HX (TU102 GSP WITH_LOADER) ===\n");
     returnToGrub = u40x_has_load_option(ImageHandle, L"--return-to-grub");
+    disableGen2 = u40x_has_load_option(ImageHandle, L"--no-gen2");
     if (returnToGrub)
         Print(L"[50HX] GRUB handoff mode: internal chainload disabled\n");
+    if (disableGen2)
+        Print(L"[50HX] PCIe Gen2 unlock disabled by --no-gen2\n");
 
     /* ---------- [1] 找卡（黑盒 fast-probe + 有界） ---------- */
     if (!u40x_find_gpu()) {
@@ -7011,7 +7017,9 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
      * on this host by patch 04: XVE override -> TLS=5GT/s on both ends ->
      * one retrain pulse on the root port -> poll LNKSTA. Failure leaves
      * the link at Gen1, which is harmless. */
-    if (u40x_enc_found == 2) {
+    if (disableGen2) {
+        Print(L"[gen2] skipped by --no-gen2\n");
+    } else if (u40x_enc_found == 2) {
         UINTN d2, f2, rd = 0, rf = 0;
         UINT32 gpuCap = u40x_pcie_cap(gBus, gDev, gFn, 2);
         UINT32 rootCap = 0;
