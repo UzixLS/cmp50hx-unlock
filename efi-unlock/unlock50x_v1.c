@@ -20,6 +20,8 @@
  *   - chainload ladder targets Linux (Ubuntu shim/grub, systemd-boot,
  *     generic \EFI\BOOT) instead of bootmgfw.efi, never chainloads itself,
  *     and falls back to returning to firmware (BDS continues BootOrder).
+ *   - optional --return-to-grub load option skips that ladder and returns
+ *     EFI_SUCCESS to the caller, allowing GRUB to chainload the OS next.
  *
  * Unlock protocol is unchanged (ported from open-gpu-kernel-modules
  * 610.43.03 init flow, proved on hardware by the 40HX project):
@@ -133,6 +135,50 @@ static void u40x_open_log(EFI_HANDLE IH) {
                     EFI_FILE_MODE_WRITE, 0);
     if (EFI_ERROR(st)) u40x_log = NULL;
     uefi_call_wrapper(root->Close, 1, root);
+}
+
+/* GRUB's EFI chainloader passes arguments as the loaded image's UTF-16
+ * LoadOptions. Match a complete whitespace-delimited token without assuming
+ * the firmware supplied a trailing NUL (LoadOptionsSize is authoritative).
+ *
+ * This is deliberately opt-in: a BootNext/BootOrder launch has no such option
+ * and therefore keeps the historical internal chainload behavior. */
+static BOOLEAN u40x_has_load_option(EFI_HANDLE IH, const CHAR16 *Option) {
+    EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+    const CHAR16 *opts;
+    UINTN chars, optionLen = 0, i = 0;
+
+    if (!BS || !IH || !Option)
+        return FALSE;
+    if (uefi_call_wrapper(BS->HandleProtocol, 3, IH, &u40x_li_guid,
+                          (void **)&li) ||
+        !li || !li->LoadOptions || li->LoadOptionsSize < sizeof(CHAR16))
+        return FALSE;
+
+    while (Option[optionLen])
+        optionLen++;
+    if (!optionLen)
+        return FALSE;
+
+    opts = (const CHAR16 *)li->LoadOptions;
+    chars = li->LoadOptionsSize / sizeof(CHAR16);
+    while (i < chars && opts[i]) {
+        UINTN start;
+        while (i < chars && opts[i] &&
+               (opts[i] == L' ' || opts[i] == L'\t' ||
+                opts[i] == L'\r' || opts[i] == L'\n'))
+            i++;
+        start = i;
+        while (i < chars && opts[i] &&
+               opts[i] != L' ' && opts[i] != L'\t' &&
+               opts[i] != L'\r' && opts[i] != L'\n')
+            i++;
+        if (i - start == optionLen &&
+            CompareMem(opts + start, Option,
+                       optionLen * sizeof(CHAR16)) == 0)
+            return TRUE;
+    }
+    return FALSE;
 }
 /* v1.50 (Linux build): NO EFIAPI here. This is called as a plain C function
  * through the Print macro (SysV ABI on Linux ELF builds); the upstream
@@ -6687,6 +6733,7 @@ EFI_STATUS EFIAPI
 efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_STATUS Status = EFI_SUCCESS;
+    BOOLEAN returnToGrub;
     UINT64 v67Phys = 0, v67LowPhys = 0;
     UINT64 ucodePhys = 0, blPhys = 0;
     UINT64 radixPhys = 0, radixTabPhys = 0, radixSize = 0;
@@ -6705,17 +6752,20 @@ efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     g_IH = ImageHandle;
     u40x_open_log(ImageHandle);
     Print(L"\n=== CMP50HX Unlock v1-50HX (TU102 GSP WITH_LOADER) ===\n");
+    returnToGrub = u40x_has_load_option(ImageHandle, L"--return-to-grub");
+    if (returnToGrub)
+        Print(L"[50HX] GRUB handoff mode: internal chainload disabled\n");
 
     /* ---------- [1] 找卡（黑盒 fast-probe + 有界） ---------- */
     if (!u40x_find_gpu()) {
         Print(L"[50HX] GPU not found; abort\n");
-        return EFI_NOT_FOUND;
+        return returnToGrub ? EFI_SUCCESS : EFI_NOT_FOUND;
     }
 
     /* ---------- [2] BAR0 enable ---------- */
     if (u40x_enable_bar()) {
         Print(L"[50HX] BAR enable failed; abort\n");
-        return EFI_DEVICE_ERROR;
+        return returnToGrub ? EFI_SUCCESS : EFI_DEVICE_ERROR;
     }
     /* Detect the card SKU from the WPR2 the VBIOS POST latched (10 GiB vs 20 GiB).
      * Must happen before any code path that consumes g_fbSize / g_frtsOffset
@@ -7042,7 +7092,9 @@ done:
      * GPU 重新initialize/unlock 丢失。改用黑盒式链载（chainload_preloaded：
      * preload bootmgfw → LoadImage → StartImage → SFS fallback），
      * 不回firmware、无第二 POST，SS0 保持、driver正常。 */
-    {
+    if (returnToGrub) {
+        Print(L"[50HX] returning to GRUB; it may now start the OS loader\n");
+    } else {
         EFI_STATUS cst = chainload_preloaded(ImageHandle);
         Print(L"[50HX] chainload result: %r\n", cst);
         if (EFI_ERROR(cst)) {
